@@ -30,7 +30,6 @@ class ImageModelUI:
             model_status = f"YOLO model load FAILED: {e}"
             model_color = "red"
 
-
         # Control bar
         control_frame = tk.Frame(root, padx=8, pady=8)
         control_frame.pack(side=tk.TOP, fill=tk.X)
@@ -153,7 +152,7 @@ class ImageModelUI:
         
         for i, box in enumerate(boxes):
             x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-            confidence = float(box.conf[0].cpu().numpy())
+            confidence = float(box.conf[0].cpu().numpy())   
             if hasattr(box, 'cls'):
                 class_id = int(box.cls[0].cpu().numpy())
             
@@ -169,7 +168,10 @@ class ImageModelUI:
         return detections
 
     def preprocess_roi_for_contour(self, roi_img):
-        
+        # Aqui usamos lo siguiente Ecualizacion de Hisstoriamas para intentar de mejorar el contraste de las hojas con aqui sin contraste
+        # Luego Unsharp Masking para buscar realzar los colores
+        # Un Filtro Bilateral para buscar retener esos bordes.
+
         lab = cv2.cvtColor(roi_img, cv2.COLOR_RGB2LAB)
         l, a, b = cv2.split(lab)
         
@@ -182,18 +184,15 @@ class ImageModelUI:
         gaussian_blur = cv2.GaussianBlur(enhanced_rgb, (9, 9), 10.0)
         unsharp_mask = cv2.addWeighted(enhanced_rgb, 1.5, gaussian_blur, -0.5, 0)
         
-        bilateral = cv2.bilateralFilter(unsharp_mask, 9, 75, 75)
-
+        bilateral = cv2.bilateralFilter(unsharp_mask, 9, 75, 75)     
         return bilateral
     
-    def extract_leaf_contour(self, roi_img):  
+    def extract_leaf_contour(self, roi_img):   
         roi_area = roi_img.shape[0] * roi_img.shape[1]
         h, w = roi_img.shape[:2]
         
-        # PREPROCESSING: Enhance contrast and edges
         preprocessed = self.preprocess_roi_for_contour(roi_img)
         
-        # Convert to different color spaces
         gray = cv2.cvtColor(preprocessed, cv2.COLOR_RGB2GRAY)
         lab = cv2.cvtColor(preprocessed, cv2.COLOR_RGB2LAB)
         l, a, b = cv2.split(lab)
@@ -201,18 +200,17 @@ class ImageModelUI:
         center_margin_h = int(h * 0.2)
         center_margin_w = int(w * 0.2)
         
-        seed_mask = np.zeros((h, w), dtype=np.uint8)
-        seed_mask[center_margin_h:h-center_margin_h, center_margin_w:w-center_margin_w] = 255
+        mask = np.zeros((h, w), dtype=np.uint8)
+        mask[center_margin_h:h-center_margin_h, center_margin_w:w-center_margin_w] = 255
         
-        seed_pixels = np.count_nonzero(seed_mask)
-
-        seed_region_l = l[seed_mask > 0]
-        seed_region_a = a[seed_mask > 0]
-        seed_region_b = b[seed_mask > 0]
+        seed_pixels = np.count_nonzero(mask)
+        region_l = l[mask > 0]
+        region_a = a[mask > 0]
+        region_b = b[mask > 0]
         
-        l_mean, l_std = seed_region_l.mean(), seed_region_l.std()
-        a_mean, a_std = seed_region_a.mean(), seed_region_a.std()
-        b_mean, b_std = seed_region_b.mean(), seed_region_b.std()
+        l_mean, l_std = region_l.mean(), region_l.std()
+        a_mean, a_std = region_a.mean(), region_a.std()
+        b_mean, b_std = region_b.mean(), region_b.std()
         
         l_tolerance = 2.5
         a_tolerance = 2.5
@@ -224,17 +222,13 @@ class ImageModelUI:
         a_upper = min(255, int(a_mean + a_tolerance * a_std))
         b_lower = max(0, int(b_mean - b_tolerance * b_std))
         b_upper = min(255, int(b_mean + b_tolerance * b_std))
-
-        
         l_mask = cv2.inRange(l, l_lower, l_upper)
         a_mask = cv2.inRange(a, a_lower, a_upper)
         b_mask = cv2.inRange(b, b_lower, b_upper)
-        
         color_similar = cv2.bitwise_and(l_mask, a_mask)
         color_similar = cv2.bitwise_and(color_similar, b_mask)
         
         similar_pixels = np.count_nonzero(color_similar)
-       
         kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         color_similar = cv2.morphologyEx(color_similar, cv2.MORPH_CLOSE, kernel_close, iterations=3)
         
@@ -242,13 +236,10 @@ class ImageModelUI:
         color_similar = cv2.morphologyEx(color_similar, cv2.MORPH_OPEN, kernel_open, iterations=2)
         
         morphed_pixels = np.count_nonzero(color_similar)
-
         strategy1_success = False
         
         if morphed_pixels > 0:
-            contours, _ = cv2.findContours(color_similar, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            
+            contours, _ = cv2.findContours(color_similar, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  
             if contours:
                 center_point = (w // 2, h // 2)
                 main_contour = None
@@ -257,33 +248,26 @@ class ImageModelUI:
                     if cv2.pointPolygonTest(contour, center_point, False) >= 0:
                         main_contour = contour
                         break
-
+                
                 if main_contour is None:
                     main_contour = max(contours, key=cv2.contourArea)
-
                 contour_area = cv2.contourArea(main_contour)
                 contour_percentage = (contour_area / roi_area) * 100
-
                 hull = cv2.convexHull(main_contour)
                 hull_area = cv2.contourArea(hull)
                 solidity = contour_area / hull_area if hull_area > 0 else 0
                 
                 if 15 < contour_percentage < 90 and solidity > 0.6:
                     strategy1_success = True
-
                     clean_leaf_mask = np.zeros_like(gray)
                     cv2.drawContours(clean_leaf_mask, [main_contour], -1, 255, -1)
-
                     kernel_fill = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
                     clean_leaf_mask = cv2.morphologyEx(clean_leaf_mask, cv2.MORPH_CLOSE, kernel_fill, iterations=2)
         if not strategy1_success:
-
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
             edges1 = cv2.Canny(blurred, 30, 90)
             edges2 = cv2.Canny(blurred, 50, 150)
             edges = cv2.bitwise_or(edges1, edges2)
-
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
             edges_dilated = cv2.dilate(edges, kernel, iterations=3)
             edges_closed = cv2.morphologyEx(edges_dilated, cv2.MORPH_CLOSE, kernel, iterations=4)
@@ -322,13 +306,11 @@ class ImageModelUI:
                 clean_leaf_mask = np.zeros_like(gray)
                 clean_leaf_mask[margin_h:h-margin_h, margin_w:w-margin_w] = 255
         
-        
         return clean_leaf_mask
     
     def extract_disease_mask(self, roi_img, clean_leaf_mask):
-
         hsv = cv2.cvtColor(roi_img, cv2.COLOR_RGB2HSV)
-        lower_healthy = np.array([35, 50, 40]) 
+        lower_healthy = np.array([35, 50, 40])
         upper_healthy = np.array([85, 255, 255])
         healthy_mask = cv2.inRange(hsv, lower_healthy, upper_healthy)
         disease_mask = cv2.bitwise_and(clean_leaf_mask, cv2.bitwise_not(healthy_mask))
@@ -355,20 +337,27 @@ class ImageModelUI:
 
         if self.yolo_model is None:
             self.log("YOLO model not available!")
+            print("[ERROR] YOLO model not available")
             return
 
         self.leaf_rois = []
         self.disease_data = []
 
         self.log("\n=== Starting Detection ===")
+        print("\n" + "=" * 60)
+        print("STARTING LEAF DETECTION AND ANALYSIS")
+        print("=" * 60)
         
         detections = self.detect_leaves_with_yolo(self.cv_image)
         
         if not detections:
             self.status_label.config(text="No leaves detected!", fg="red")
+            print("\n[RESULT] No leaves detected!")
             return
 
         self.log(f"\nTotal leaves detected: {len(detections)}")
+        print(f"\n[ANALYSIS] Processing {len(detections)} detected leaves...")
+
         self.annotated_image = self.cv_image.copy()
         self.segmentation_image = np.zeros((self.cv_image.shape[0], self.cv_image.shape[1], 3), dtype=np.uint8)
         self.contour_debug_image = np.zeros((self.cv_image.shape[0], self.cv_image.shape[1], 3), dtype=np.uint8)
@@ -391,7 +380,6 @@ class ImageModelUI:
             
             self.log(f"\n[Processing Leaf {leaf_id}]")
             leaf_mask = self.extract_leaf_contour(roi_img)
-
             disease_mask, disease_pct = self.extract_disease_mask(roi_img, leaf_mask)
             self.leaf_rois.append(detection['bbox'])
             self.disease_data.append({
@@ -439,7 +427,6 @@ class ImageModelUI:
         self.info_text.insert(tk.END, "=" * 35 + "\n\n")
         
         total_disease_pct = sum(d['disease_pct'] for d in self.disease_data) / len(self.disease_data)
-        
         for data in self.disease_data:
             self.info_text.insert(tk.END, f"--- LEAF {data['id']} ---\n")
             self.info_text.insert(tk.END, f"Confidence: {data['confidence']:.2f}\n")
@@ -472,7 +459,7 @@ class ImageModelUI:
         else:
             overall_status = "Severe disease detected"
             color = "red"
-        
+            
         self.status_label.config(text=f"{len(detections)} leaves - {overall_status}", fg=color)
 
     def toggle_segmentation(self):
@@ -493,13 +480,29 @@ class ImageModelUI:
             self.status_label.config(text=f"{len(self.leaf_rois)} leaves detected", fg="green")
 
     def show_image(self, pil_img):
-        max_w, max_h = 640, 480
-        img = pil_img.copy()
-        img.thumbnail((max_w, max_h))
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+
+        if canvas_width <= 1:
+            canvas_width = 640
+        if canvas_height <= 1:
+            canvas_height = 480
+        
+        img_width, img_height = pil_img.size
+        
+        width_ratio = canvas_width / img_width
+        height_ratio = canvas_height / img_height
+        scale_factor = max(width_ratio, height_ratio)  
+
+        new_width = int(img_width * scale_factor)
+        new_height = int(img_height * scale_factor)
+
+        img = pil_img.resize((new_width, new_height), Image.LANCZOS)
 
         self.current_display_image = ImageTk.PhotoImage(img)
+
         self.canvas.delete("all")
-        self.canvas.create_image(max_w // 2, max_h // 2, image=self.current_display_image)
+        self.canvas.create_image(canvas_width // 2, canvas_height // 2, image=self.current_display_image)
 
 
 if __name__ == "__main__":
